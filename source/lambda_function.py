@@ -7,6 +7,7 @@ import time
 from datetime import datetime
 import random, string
 import googlemaps
+import slackweb
 
 import requests
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
@@ -20,32 +21,23 @@ import importer_util
 import logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-_consoleHandler = logging.StreamHandler(sys.stdout)
-_consoleHandler.setLevel(logging.INFO)
-_simpleFormatter = logging.Formatter(
-    fmt='%(levelname)-5s %(funcName)-20s %(lineno)4s: %(message)s'
-)
-_consoleHandler.setFormatter(_simpleFormatter)
-logger.addHandler(_consoleHandler)
 
 from retry import retry
 import boto3
 from boto3.dynamodb.conditions import Key
 
-S3_BUCKET_NAME              = ""    if("S3_BUCKET_NAME" not in os.environ)          else os.environ["S3_BUCKET_NAME"]
-DYNAMODB_NAME               = ""    if("DYNAMODB_NAME" not in os.environ)           else os.environ["DYNAMODB_NAME"]
-APIKEY_GOOGLE_MAP           = ""    if("APIKEY_GOOGLE_MAP" not in os.environ)       else os.environ["APIKEY_GOOGLE_MAP"]
+S3_BUCKET_NAME          = ""    if("S3_BUCKET_NAME" not in os.environ)          else os.environ["S3_BUCKET_NAME"]
+S3_PREFIX               = ""    if("S3_PREFIX" not in os.environ)               else os.environ["S3_PREFIX"]
+S3_PREFIX_BACK          = ""    if("S3_PREFIX_BACK" not in os.environ)          else os.environ["S3_PREFIX_BACK"]
+DYNAMODB_NAME           = ""    if("DYNAMODB_NAME" not in os.environ)           else os.environ["DYNAMODB_NAME"]
+APIKEY_GOOGLE_MAP       = ""    if("APIKEY_GOOGLE_MAP" not in os.environ)       else os.environ["APIKEY_GOOGLE_MAP"]
+ENDPOINT_ES             = ""    if("ENDPOINT_ES" not in os.environ)             else os.environ["ENDPOINT_ES"]
+SLACK_WEBHOOK_HAMAMATSU = ""    if("SLACK_WEBHOOK_HAMAMATSU" not in os.environ) else os.environ["SLACK_WEBHOOK_HAMAMATSU"]
 
-
-S3_BUCKET_NAME = "near-near-map"
-DYNAMODB_NAME = "near-near-map-2"
-APIKEY_GOOGLE_MAP = "AIzaSyAU57bLSlVhZYnJ8Tb-Ud3qFtiDthWQIM8"
-ENDPOINT_ES = "search-near-near-map-2axzwunoy5zuzjjct3qojkaoqu.ap-northeast-1.es.amazonaws.com"
-
-DYNAMO_TABLE                = boto3.resource("dynamodb").Table(DYNAMODB_NAME)
-S3_SOURCE_BUCKET            = boto3.resource('s3').Bucket(S3_BUCKET_NAME)
-S3_CLIENT                   = boto3.client("s3")
-GMAPS                       = googlemaps.Client(key=APIKEY_GOOGLE_MAP)
+DYNAMO_TABLE            = boto3.resource("dynamodb").Table(DYNAMODB_NAME)
+S3_SOURCE_BUCKET        = boto3.resource('s3').Bucket(S3_BUCKET_NAME)
+S3_CLIENT               = boto3.client("s3")
+GMAPS                   = googlemaps.Client(key=APIKEY_GOOGLE_MAP)
 
 from elasticsearch import Elasticsearch, RequestsHttpConnection
 from requests_aws4auth import AWS4Auth
@@ -64,11 +56,26 @@ ELS = Elasticsearch(
 def lambda_handler(event, context):
     try:
         logger.info("start")
-        files = getFilesFromS3("crawler/")
+
+        files = getFilesFromS3(S3_PREFIX)
+        if files is None or len(files) == 0:
+            return {
+                "statusCode": 304,
+                "body": "Not Modified"
+            }
+
         index = 0
         for file in files:
             index += 1
             importProc(S3_BUCKET_NAME, file)
+            backupProc(S3_BUCKET_NAME, file, S3_PREFIX, S3_PREFIX_BACK)
+            message = "CSV IMPORTER : \n{0}".format(file)
+            notifyToSlack(SLACK_WEBHOOK_HAMAMATSU, message)
+
+        return {
+            "statusCode": 200,
+            "body": ",".join(files)
+        }
 
     except Exception as e:
         logger.exception(e)
@@ -78,7 +85,15 @@ def lambda_handler(event, context):
         }
 
 @retry(tries=3, delay=1)
+def notifyToSlack(webhook_url, text):
+    slack = slackweb.Slack(url = webhook_url)
+    slack.notify(text = text)
+
+@retry(tries=3, delay=1)
 def getFilesFromS3(prefix):
+    if prefix[-1:] is not "/":
+        prefix = prefix + "/"
+    
     files = []
     objs = S3_SOURCE_BUCKET.meta.client.list_objects_v2(Bucket=S3_SOURCE_BUCKET.name, Prefix=prefix, Delimiter='/')
     for o in objs.get('Contents'):
@@ -100,6 +115,12 @@ def importProc(bucketName, key):
         if(lineno <= 1):
             continue
         importLine(csvLine, fileName)
+
+@retry(tries=3, delay=1)
+def backupProc(bucketName, key_org, prefix_org, prefix_back):
+    key_back = key_org.replace(prefix_org, prefix_back, 1)
+    S3_CLIENT.copy_object(Bucket=bucketName, Key=key_back, CopySource={'Bucket': bucketName, 'Key': key_org})
+    S3_CLIENT.delete_object(Bucket=bucketName, Key=key_org)
 
 @retry(tries=3, delay=1)
 def getFromS3(bucketName, key):
@@ -141,10 +162,9 @@ def importLine(csvLine, fileName):
         record = None
         if "tel" not in data or not data["tel"]:
             record = None
-            logger.info("xxxxxxxxxxx")
         else:
             record = selectItem(data)
-        # record = None
+
         if record == None or len(record) == 0:
             insertItem(data)
         else:
@@ -560,8 +580,3 @@ def checkIFrameEnableItem(item):
     except Exception as e:
         logger.error(e)
 
-
-def main():
-    lambda_handler(None, None)
-    
-main()

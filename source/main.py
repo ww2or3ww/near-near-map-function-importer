@@ -16,7 +16,10 @@ import lambda_function
 
 def main():
     try:
-        lambda_function.lambda_handler(None, None)
+        event = {}
+        ret = lambda_function.lambda_handler(event, None)
+        logger.info("event = {0}".format(event))
+        logger.info("result = {0}".format(ret))
 
     except Exception as e:
         logger.exception(e)
