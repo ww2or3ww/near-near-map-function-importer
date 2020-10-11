@@ -58,9 +58,9 @@ def lambda_handler(event, context):
         index = 0
         for file in files:
             index += 1
-            importProc(S3_BUCKET_NAME, file)
+            success_count, faile_count = importProc(S3_BUCKET_NAME, file)
             backupProc(S3_BUCKET_NAME, file, S3_PREFIX_IN, S3_PREFIX_IN_BACK)
-            message = "CSV IMPORTER : \n{0}".format(file)
+            message = "CSV IMPORTER : {0}\n success = {1}, failed = {2}".format(file, success_count, faile_count)
             notifyToSlack(SLACK_WEBHOOK_HAMAMATSU, message)
 
         return {
@@ -100,12 +100,19 @@ def importProc(bucketName, key):
     file = open(localPath, "r")
     reader = csv.reader(file)
     lineno = 0
+    success_count = 0
+    faile_count = 0
     for csvLine in reader:
         lineno = lineno + 1
         logger.info(key + " : lineno = " + str(lineno))
         if(lineno <= 1):
             continue
-        importLine(csvLine, fileName)
+        if importLine(csvLine, fileName):
+            success_count = success_count + 1
+        else:
+            faile_count = faile_count + 1
+    
+    return success_count, faile_count
 
 @retry(tries=3, delay=1)
 def backupProc(bucketName, key_org, prefix_org, prefix_back):
@@ -143,42 +150,31 @@ def importLine(csvLine, fileName):
         if "latlon" not in data or not data["latlon"]:
             setLatLonToData(data)
             
-        # 検索のためにh3-9を取得する
+        # 既に登録済みか確認する
         latlon_ary = data["latlon"].split(",")
         h3index9 = h3.geo_to_h3(float(latlon_ary[0]), float(latlon_ary[1]), 9)
-        data["p-h3-9"] = h3index9
+        records = selectItem(data, h3index9)
         
-        records = selectItem(data)
-        
-        if len(records) == 0:
-            insertItem(data)
-            uploadItem(data)
+        if records is None or len(records) == 0:
+            insertItem(data, h3index9)
 
-        elif data["tel"] and len(records) == 1:
-            merged_data = updateItem(records[0], data)
-            uploadItem(merged_data)
+        elif len(records) == 1:
+            updateItem(records[0], data)
 
         elif not data["tel"]:
-            message = "CSV IMPORTER : \n Alert : MULTIPLE NO TELEPHONE\n {0}".format(data["title"])
+            message = "CSV IMPORTER : {0}\n Alert : MULTIPLE NO TELEPHONE\n {1}".format(fileName, data["title"])
             notifyToSlack(SLACK_WEBHOOK_HAMAMATSU, message)
             
         else:
-            message = "CSV IMPORTER : \n Alert : MULTIPLE RECORDS({0}) {1}\n {2}\n {3}".format(len(records), data["title"], records[0], records[1])
+            message = "CSV IMPORTER : {0}\n Alert : MULTIPLE RECORDS({1}) {2}\n {3}\n {4}".format(fileName, len(records), data["title"], records[0], records[1])
             notifyToSlack(SLACK_WEBHOOK_HAMAMATSU, message)
 
+        return True
     except Exception as e:
-        logger.error(data)
-        logger.error(e)
-
-
-@retry(tries=3, delay=1)
-def uploadItem(data):
-    key_list = data["h3-9"].split("_")
-    key = os.path.join(S3_PREFIX_OUT, "p-type={0}".format(data["type"]), "p-h3-9={0}".format(key_list[0]), "{0}.json".format(key_list[1]))
-
-    s3_obj = S3_RESOURCE.Object(S3_BUCKET_NAME, key)
-    ret = s3_obj.put(Body = json.dumps(data))
-
+        logger.exception(e)
+        message = "CSV IMPORTER : {0}\n Exception : {1}".format(fileName, e.__class__.__name__)
+        notifyToSlack(SLACK_WEBHOOK_HAMAMATSU, message)
+        return False
 
 @retry(tries=3, delay=1)
 def setSiteToData(data):
@@ -203,7 +199,7 @@ def setSiteToData(data):
 
     except Exception as e:
         logger.error(data)
-        logger.error(e)
+        logger.exception(e)
 
 @retry(tries=3, delay=1)
 def setTelAndLatLonToData(data):
@@ -228,13 +224,14 @@ def setTelAndLatLonToData(data):
 
     except Exception as e:
         logger.error(data)
-        logger.error(e)
+        logger.exception(e)
 
 @retry(tries=3, delay=1)
-def selectItem(data):
+def selectItem(data, h3index9):
     
     try:
-        query = "SELECT * FROM \"near-near-map-h3\".\"data\" where \"p-type\" = '{0}' and \"p-h3-9\" like '{1}' and \"tel\" = '{2}' limit 10;".format(data["type"], data["p-h3-9"], data["tel"])
+        query = "SELECT * FROM \"near-near-map-h3\".\"data\" where \"p_type\" = '{0}' and \"p_h3_9\" like '{1}' and \"tel\" = '{2}' limit 10;".format(data["type"], h3index9, data["tel"])
+        logger.info(query)
         response = ATHENA.start_query_execution(
             QueryString=query,
             QueryExecutionContext={
@@ -272,10 +269,8 @@ def selectItem(data):
 
     except Exception as e:
         logger.error(data)
-        logger.error(e)
+        logger.exception(e)
 
-    logger.info("--------------------")
-        
     return None
 
 @retry(tries=5, delay=2)
@@ -289,7 +284,8 @@ def poll_status(_id):
     else:
         raise Exception
         
-def insertItem(data):
+def insertItem(data, h3index9):
+    latlon_ary = data["latlon"].split(",")
     h3index8 = h3.geo_to_h3(float(latlon_ary[0]), float(latlon_ary[1]), 8)
     h3index7 = h3.geo_to_h3(float(latlon_ary[0]), float(latlon_ary[1]), 7)
     h3index6 = h3.geo_to_h3(float(latlon_ary[0]), float(latlon_ary[1]), 6)
@@ -305,7 +301,6 @@ def insertItem(data):
         setSiteToData(data)
 
     checkIFrameEnableItem(data)
-
     insertItemD(data)
 
 @retry(tries=3, delay=1)
@@ -315,18 +310,16 @@ def insertItemD(data):
     )
     logger.info("insert : " + data["title"])
 
-@retry(tries=3, delay=1)
 def updateItem(orgData, newData):
-    checkIFrameEnableItem(newData)
-
     data = margeData(orgData, newData)
     if data == None:
         return
-    
+
     # homepageがなければgoogleから探す
     if "homepage" not in data or not data["homepage"]:
         setSiteToData(data)
 
+    checkIFrameEnableItem(data)
     updateItemD(data)
     
     return data
@@ -400,7 +393,7 @@ def setLatLonToData(data):
         data["latlon"] = "{0},{1}".format(lat, lng)
     except Exception as e:
         logger.error(data)
-        logger.error(e)
+        logger.exception(e)
         raise
 
 def margeData(org, new):
@@ -411,27 +404,31 @@ def margeData(org, new):
             "h3-8"      : org["h3-8"],
             "h3-7"      : org["h3-7"],
             "h3-6"      : org["h3-6"],
-            "tel"       : org["tel"], 
             "title"     : org["title"], 
-            "address"   : org["address"]
+            "address"   : org["address"],
+            "latlon"    : org["latlon"]
         }
         isUpdated = False
-        isUpdated |= mergeItem(data, org, new, "locoguide_id")
-        isUpdated |= mergeItem(data, org, new, "latlon")
+        isUpdated |= mergeItem(data, org, new, "tel")
         isUpdated |= mergeItem(data, org, new, "homepage")
         isUpdated |= mergeItem(data, org, new, "facebook")
         isUpdated |= mergeItem(data, org, new, "instagram")
         isUpdated |= mergeItem(data, org, new, "twitter")
         isUpdated |= mergeItem(data, org, new, "image")
         isUpdated |= mergeItem(data, org, new, "locoguide_id")
-        isUpdated |= mergeItem(data, org, new, "star")
-        
-        if org["has_xframe_options"] != new["has_xframe_options"]:
-            isUpdated = True
-            data["has_xframe_options"] = new["has_xframe_options"]
-        else:
-            data["has_xframe_options"] = org["has_xframe_options"]
 
+        starOrg = 0
+        starNew = 0
+        if "star" in org:
+            starOrg = int(org["star"])
+        if "star" in new:
+            starNew = int(new["star"])
+        
+        if starOrg == 1 or starNew == 1:
+            data["star"] = 1
+        else:
+            data["star"] = 0
+        
         data["media1"] = org["media1"]
         data["media2"] = org["media2"]
         data["media3"] = org["media3"]
@@ -468,7 +465,7 @@ def margeData(org, new):
         
     except Exception as e:
         logger.error(data)
-        logger.error(e)
+        logger.exception(e)
         return None
 
 def getEmptyMediaKey(data):
@@ -525,24 +522,27 @@ def convertCsv2Json(csvLine):
             "media3"     : csvLine[10], 
             "media4"     : csvLine[11], 
             "media5"     : csvLine[12],
-            "locoguide_id" : csvLine[13],
-            "star"       : int(csvLine[14])
+            "locoguide_id" : csvLine[13]
         }
+        
+        if str.isdecimal(csvLine[14]):
+            data["star"] = int(csvLine[14])
+        else:
+            data["star"] = 0
 
         return data
         
     except Exception as e:
-        logger.error(data)
-        logger.error(e)
+        logger.exception(e)
         return None
 
 def randomname(n):
    randlst = [random.choice(string.ascii_letters + string.digits) for i in range(n)]
    return ''.join(randlst)
  
-@retry(tries=3, delay=1)
+@retry(tries=2, delay=1)
 def requestWithRetry(url):
-    return requests.get(url, verify=False)
+    return requests.get(url, verify=False, timeout=(5.0, 5.0))
     
 def checkIFrameEnable(type, item, flgs, index):
     optionFlg = 0
@@ -552,7 +552,7 @@ def checkIFrameEnable(type, item, flgs, index):
             if "X-Frame-Options" in response.headers:
                 optionFlg = 1
         except Exception as e:
-            logger.error(e)
+            logger.exception(e)
                 
     flgs[index] = optionFlg
     
@@ -582,5 +582,5 @@ def checkIFrameEnableItem(item):
         #     item["image"] = "images/life/kyorindo.jpg"
 
     except Exception as e:
-        logger.error(e)
+        logger.exception(e)
 
