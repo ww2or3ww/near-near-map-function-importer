@@ -34,6 +34,10 @@ S3_PREFIX_OUT           = ""    if("S3_PREFIX_OUT" not in os.environ)           
 DYNAMODB_NAME           = ""    if("DYNAMODB_NAME" not in os.environ)               else os.environ["DYNAMODB_NAME"]
 APIKEY_GOOGLE_MAP       = ""    if("APIKEY_GOOGLE_MAP" not in os.environ)           else os.environ["APIKEY_GOOGLE_MAP"]
 SLACK_WEBHOOK_HAMAMATSU = ""    if("SLACK_WEBHOOK_HAMAMATSU" not in os.environ)     else os.environ["SLACK_WEBHOOK_HAMAMATSU"]
+ATHENA_DB_NAME          = ""    if("ATHENA_DB_NAME" not in os.environ)              else os.environ["ATHENA_DB_NAME"]
+ATHENA_TABLE_NAME       = ""    if("ATHENA_TABLE_NAME" not in os.environ)           else os.environ["ATHENA_TABLE_NAME"]
+ATHENA_OUTPUT_BUCKET    = ""    if("ATHENA_OUTPUT_BUCKET" not in os.environ)        else os.environ["ATHENA_OUTPUT_BUCKET"]
+ATHENA_OUTPUT_PREFIX    = ""    if("ATHENA_OUTPUT_PREFIX" not in os.environ)        else os.environ["ATHENA_OUTPUT_PREFIX"]
 
 DYNAMO_TABLE            = boto3.resource("dynamodb").Table(DYNAMODB_NAME)
 S3_SOURCE_BUCKET        = boto3.resource('s3').Bucket(S3_BUCKET_NAME)
@@ -230,17 +234,20 @@ def setTelAndLatLonToData(data):
 def selectItem(data, h3index9):
     
     try:
-        query = "SELECT * FROM \"near-near-map-h3\".\"data\" where \"p_type\" = '{0}' and \"p_h3_9\" like '{1}' and \"tel\" = '{2}' limit 10;".format(data["type"], h3index9, data["tel"])
+        query = "SELECT * FROM \"{0}\"".format(ATHENA_TABLE_NAME) + \
+                " where \"p_type\" = '{0}' and \"p_h3_9\" like '{1}' and \"tel\" = '{2}' limit 10;".format(data["type"], h3index9, data["tel"])
+        athenaLocation = os.path.join("s3://", ATHENA_OUTPUT_BUCKET, ATHENA_OUTPUT_PREFIX)
         logger.info(query)
         response = ATHENA.start_query_execution(
             QueryString=query,
             QueryExecutionContext={
-                "Database": "near-near-map-h3"
+                "Database": ATHENA_DB_NAME
             },
             ResultConfiguration={
-                "OutputLocation": "s3://near-near-map-p/athena",
+                "OutputLocation": athenaLocation
             }
         )
+
         
         QueryExecutionId = response['QueryExecutionId']
         time.sleep(3)
@@ -248,11 +255,11 @@ def selectItem(data, h3index9):
         
         if result['QueryExecution']['Status']['State'] == 'SUCCEEDED':
     
-            s3_key = "athena/" + QueryExecutionId + '.csv'
-            local_filename = QueryExecutionId + '.csv'
+            s3_key = os.path.join(ATHENA_OUTPUT_PREFIX, QueryExecutionId + '.csv')
+            local_filename = "/tmp/" + QueryExecutionId + '.csv'
     
             # download result file
-            S3_RESOURCE.Bucket("near-near-map-p").download_file(s3_key, local_filename)
+            S3_RESOURCE.Bucket(ATHENA_OUTPUT_BUCKET).download_file(s3_key, local_filename)
 
             # read file to array
             rows = []
