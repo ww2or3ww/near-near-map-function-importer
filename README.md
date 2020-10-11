@@ -1,4 +1,4 @@
-# near-near-map-importer
+# near-near-map-function-importer
 
 ## ライブラリのインストール
 
