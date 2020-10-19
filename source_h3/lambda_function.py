@@ -32,6 +32,7 @@ S3_PREFIX_IN            = ""    if("S3_PREFIX_IN" not in os.environ)            
 S3_PREFIX_IN_BACK       = ""    if("S3_PREFIX_IN_BACK" not in os.environ)           else os.environ["S3_PREFIX_IN_BACK"]
 S3_PREFIX_OUT           = ""    if("S3_PREFIX_OUT" not in os.environ)               else os.environ["S3_PREFIX_OUT"]
 DYNAMODB_NAME           = ""    if("DYNAMODB_NAME" not in os.environ)               else os.environ["DYNAMODB_NAME"]
+DYNAMODB_SETTING_NAME   = ""    if("DYNAMODB_SETTING_NAME" not in os.environ)       else os.environ["DYNAMODB_SETTING_NAME"]
 APIKEY_GOOGLE_MAP       = ""    if("APIKEY_GOOGLE_MAP" not in os.environ)           else os.environ["APIKEY_GOOGLE_MAP"]
 SLACK_WEBHOOK_HAMAMATSU = ""    if("SLACK_WEBHOOK_HAMAMATSU" not in os.environ)     else os.environ["SLACK_WEBHOOK_HAMAMATSU"]
 ATHENA_DB_NAME          = ""    if("ATHENA_DB_NAME" not in os.environ)              else os.environ["ATHENA_DB_NAME"]
@@ -40,6 +41,7 @@ ATHENA_OUTPUT_BUCKET    = ""    if("ATHENA_OUTPUT_BUCKET" not in os.environ)    
 ATHENA_OUTPUT_PREFIX    = ""    if("ATHENA_OUTPUT_PREFIX" not in os.environ)        else os.environ["ATHENA_OUTPUT_PREFIX"]
 
 DYNAMO_TABLE            = boto3.resource("dynamodb").Table(DYNAMODB_NAME)
+DYNAMO_TABLE_SETTING    = boto3.resource("dynamodb").Table(DYNAMODB_SETTING_NAME)
 S3_SOURCE_BUCKET        = boto3.resource('s3').Bucket(S3_BUCKET_NAME)
 S3_CLIENT               = boto3.client("s3")
 S3_RESOURCE             = boto3.resource("s3")
@@ -64,6 +66,7 @@ def lambda_handler(event, context):
             index += 1
             success_count, faile_count = importProc(S3_BUCKET_NAME, file)
             backupProc(S3_BUCKET_NAME, file, S3_PREFIX_IN, S3_PREFIX_IN_BACK)
+            deleteLastLineNo(file)
             message = "CSV IMPORTER : {0}\n success = {1}, failed = {2}".format(file, success_count, faile_count)
             notifyToSlack(SLACK_WEBHOOK_HAMAMATSU, message)
 
@@ -74,6 +77,8 @@ def lambda_handler(event, context):
 
     except Exception as e:
         logger.exception(e)
+        message = "CSV IMPORTER : " + "Exception : " + e.__class__.__name__
+        notifyToSlack(SLACK_WEBHOOK_HAMAMATSU, message)
         return {
             "statusCode": 500,
             "body": "error"
@@ -103,20 +108,29 @@ def importProc(bucketName, key):
     fileName = os.path.basename(localPath)
     file = open(localPath, "r")
     reader = csv.reader(file)
+    forceTitle = isForceTitle(key)
+    lastLineNo = getLastLineNo(key)
     lineno = 0
     success_count = 0
     faile_count = 0
     for csvLine in reader:
         lineno = lineno + 1
         logger.info(key + " : lineno = " + str(lineno))
-        if(lineno <= 1):
+        if(lineno <= lastLineNo):
             continue
-        if importLine(csvLine, fileName):
+        if importLine(csvLine, fileName, forceTitle):
             success_count = success_count + 1
+            updateFileLine(key, lineno)
         else:
             faile_count = faile_count + 1
     
     return success_count, faile_count
+    
+def isForceTitle(key):
+    if key.find("gotoeat_fujinokuni_") >= 0:
+        return True
+    
+    return False
 
 @retry(tries=3, delay=1)
 def backupProc(bucketName, key_org, prefix_org, prefix_back):
@@ -133,11 +147,11 @@ def getFromS3(bucketName, key):
     S3_CLIENT.download_file(Bucket = bucketName, Key = key, Filename = localPath)
     return localPath
 
-def importLine(csvLine, fileName):
+def importLine(csvLine, fileName, forceTitle):
     try:
         data = convertCsv2Json(csvLine)
         if data == None:
-            return
+            return False
         
         # telに数字以外が入ってたり、11文字より長かったらクリアする
         if "tel" in data and data["tel"]:
@@ -163,22 +177,24 @@ def importLine(csvLine, fileName):
             insertItem(data, h3index9)
 
         elif len(records) == 1:
-            updateItem(records[0], data)
+            updateItem(records[0], data, forceTitle)
 
         elif not data["tel"]:
             message = "CSV IMPORTER : {0}\n Alert : MULTIPLE NO TELEPHONE\n {1}".format(fileName, data["title"])
             notifyToSlack(SLACK_WEBHOOK_HAMAMATSU, message)
+            return False
             
         else:
             message = "CSV IMPORTER : {0}\n Alert : MULTIPLE RECORDS({1}) {2}\n {3}\n {4}".format(fileName, len(records), data["title"], records[0], records[1])
             notifyToSlack(SLACK_WEBHOOK_HAMAMATSU, message)
+            return False
 
         return True
     except Exception as e:
         logger.exception(e)
         message = "CSV IMPORTER : {0}\n Exception : {1}".format(fileName, e.__class__.__name__)
         notifyToSlack(SLACK_WEBHOOK_HAMAMATSU, message)
-        return False
+        raise
 
 @retry(tries=3, delay=1)
 def setSiteToData(data):
@@ -317,8 +333,50 @@ def insertItemD(data):
     )
     logger.info("insert : " + data["title"])
 
-def updateItem(orgData, newData):
-    data = margeData(orgData, newData)
+
+
+@retry(tries=3, delay=1)
+def deleteLastLineNo(key):
+    DYNAMO_TABLE_SETTING.delete_item(
+      Key = {
+        "key": key
+      }
+    )
+    
+@retry(tries=3, delay=1)
+def getLastLineNo(key):
+    records = DYNAMO_TABLE_SETTING.query(
+        KeyConditionExpression=Key("key").eq(key)
+    )
+    
+    if records is None or records["Count"] is 0:
+        DYNAMO_TABLE_SETTING.put_item(
+          Item = {
+            "key": key, 
+            "value": "1"
+          }
+        )
+        return 1
+    
+    return int(records["Items"][0]["value"])
+
+@retry(tries=3, delay=1)
+def updateFileLine(key, lineNo):
+    DYNAMO_TABLE_SETTING.update_item(
+        Key={
+            "key": key
+        },
+        UpdateExpression="set #value = :value",
+        ExpressionAttributeNames={
+            "#value": "value"
+        },
+        ExpressionAttributeValues={
+            ":value": str(lineNo)
+        }
+    )
+
+def updateItem(orgData, newData, forceTitle):
+    data = margeData(orgData, newData, forceTitle)
     if data == None:
         return
 
@@ -403,7 +461,7 @@ def setLatLonToData(data):
         logger.exception(e)
         raise
 
-def margeData(org, new):
+def margeData(org, new, forceTitle):
     try:
         data = {
             "type"      : org["type"], 
@@ -415,6 +473,10 @@ def margeData(org, new):
             "address"   : org["address"],
             "latlon"    : org["latlon"]
         }
+        
+        if forceTitle:
+            data["title"] = new["title"]
+        
         isUpdated = False
         isUpdated |= mergeItem(data, org, new, "tel")
         isUpdated |= mergeItem(data, org, new, "homepage")
@@ -430,11 +492,7 @@ def margeData(org, new):
             starOrg = int(org["star"])
         if "star" in new:
             starNew = int(new["star"])
-        
-        if starOrg == 1 or starNew == 1:
-            data["star"] = 1
-        else:
-            data["star"] = 0
+        data["star"] = starOrg | starNew
         
         data["media1"] = org["media1"]
         data["media2"] = org["media2"]
