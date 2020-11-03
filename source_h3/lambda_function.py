@@ -127,7 +127,7 @@ def importProc(bucketName, key):
     return success_count, faile_count
     
 def isForceTitle(key):
-    if key.find("gotoeat_fujinokuni_") >= 0:
+    if key.find("gotoeat_") >= 0:
         return True
     
     return False
