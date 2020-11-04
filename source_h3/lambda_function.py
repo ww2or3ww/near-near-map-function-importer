@@ -452,6 +452,7 @@ def setLatLonToData(data):
         result = GMAPS.geocode("{0} {1}".format(data["address"], data["title"]))
         if len(result) == 0:
             result = GMAPS.geocode("{0}".format(data["address"]))
+            
         lat = result[0]["geometry"]["location"]["lat"]
         lng = result[0]["geometry"]["location"]["lng"]
         
@@ -576,8 +577,8 @@ def convertCsv2Json(csvLine):
         data = {
             "type"      : csvLine[0], 
             "tel"       : re.sub("[- ]", "", csvLine[1]), 
-            "title"     : csvLine[2].replace("\u3000", " "), 
-            "address"   : csvLine[3], 
+            "title"     : csvLine[2].replace('\u3000', " "), 
+            "address"   : csvLine[3].replace('\u3000', " "), 
             "homepage"  : csvLine[4], 
             "facebook"  : csvLine[5], 
             "instagram" : csvLine[6], 
