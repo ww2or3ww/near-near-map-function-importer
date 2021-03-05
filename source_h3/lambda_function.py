@@ -214,8 +214,10 @@ def setSiteToData(data):
         detail  = GMAPS.place(place_id = placeId , fields = ["website"])
         resultDetail = detail["result"]
         if "website" in resultDetail and resultDetail["website"]:
-            data["homepage"] = resultDetail["website"]
-            importer_util.setSNSLinksToData(data["homepage"], data)
+            root, ext = os.path.splitext(resultDetail["website"])
+            if ext.lower() != ".pdf":
+                data["homepage"] = resultDetail["website"]
+                importer_util.setSNSLinksToData(data["homepage"], data)
 
     except Exception as e:
         logger.error(data)
@@ -577,8 +579,8 @@ def convertCsv2Json(csvLine):
         data = {
             "type"      : csvLine[0], 
             "tel"       : re.sub("[- ]", "", csvLine[1]), 
-            "title"     : csvLine[2].replace('\u3000', " "), 
-            "address"   : csvLine[3].replace('\u3000', " "), 
+            "title"     : csvLine[2].replace('\u3000', " ").strip(), 
+            "address"   : csvLine[3].replace('\u3000', " ").strip(), 
             "homepage"  : csvLine[4], 
             "facebook"  : csvLine[5], 
             "instagram" : csvLine[6], 
@@ -596,6 +598,11 @@ def convertCsv2Json(csvLine):
         else:
             data["star"] = 0
 
+        if len(csvLine) > 15 and str.isdecimal(csvLine[15]):
+            data["subtype"] = int(csvLine[15])
+        else:
+            data["subtype"] = 0
+
         return data
         
     except Exception as e:
@@ -609,19 +616,22 @@ def randomname(n):
 @retry(tries=2, delay=1)
 def requestWithRetry(url):
     return requests.get(url, verify=False, timeout=(5.0, 5.0))
-    
+
 def checkIFrameEnable(type, item, flgs, index):
     optionFlg = 0
     if type in item and item[type].find("https") == 0:
         try:
-            response = requestWithRetry(item[type])
-            if "X-Frame-Options" in response.headers:
+            if item[type].find("navitime.co.jp") > 0 or item[type].find("shrine.mobi") > 0:
                 optionFlg = 1
+            else:
+                response = requestWithRetry(item[type])
+                if "X-Frame-Options" in response.headers:
+                    optionFlg = 1
         except Exception as e:
             logger.exception(e)
-                
+
     flgs[index] = optionFlg
-    
+
 def checkIFrameEnableItem(item):
     has_xframe_options = [0, 0, 0, 0, 0, 0]
     

@@ -35,13 +35,13 @@ def getBeautifulSoup(url):
     return soup
 
 def setLinkToData(url, data):
-    if url.find("facebook.com/") > 0 and url.find(".php?") < 0:
+    if url.find("facebook.com/") > 0 and url.find(".php?") < 0 and url.find("facebook.com/WixJapan") < 0:
         if isPage(url, "facebook.com"):
             data["facebook"] = trimParam(url)
     elif url.find("instagram.com/") > 0:
         if isPage(url, "instagram.com"):
             data["instagram"] = trimParam(url)
-    elif url.find("twitter.com/") > 0 and url.find("twitter.com/share") < 0:
+    elif url.find("twitter.com/") > 0 and url.find("twitter.com/share") < 0 and url.find("twitter.com/intent/") < 0 and url.find("twitter.com/WixJp") < 0:
         if isPage(url, "twitter.com"):
             data["twitter"] = trimParam(url)
 
